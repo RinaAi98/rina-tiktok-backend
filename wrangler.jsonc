@@ -1,0 +1,7 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rina-tiktok-backend",
+  "main": "src/worker.py",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": ["python_workers"]
+}
