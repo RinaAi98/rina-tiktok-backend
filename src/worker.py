@@ -101,17 +101,12 @@ def tiktok_callback():
 
     try:
         import httpx
-        import asyncio
-
-        async def exchange_token():
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                return await client.post(
-                    "https://open.tiktokapis.com/v2/oauth/token/",
-                    content=body,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-
-        response = asyncio.run(exchange_token())
+        with httpx.Client(timeout=20.0) as client:
+            response = client.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                content=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
         try:
             token = response.json()
         except Exception:
