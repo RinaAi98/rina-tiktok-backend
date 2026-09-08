@@ -6,6 +6,7 @@ import os
 import time
 from urllib.parse import urlencode
 
+import urllib.error
 import urllib.parse
 import urllib.request
 from flask import Flask, jsonify, redirect, request
@@ -96,8 +97,23 @@ def tiktok_callback():
         )
         with urllib.request.urlopen(req, timeout=20) as response:
             token = json.loads(response.read().decode())
-    except Exception:
-        return jsonify({"error": "token_exchange_failed"}), 502
+    except urllib.error.HTTPError as exc:
+        raw_error = exc.read().decode("utf-8", errors="replace")
+        try:
+            error_data = json.loads(raw_error)
+        except Exception:
+            error_data = {}
+        return jsonify({
+            "error": "token_exchange_failed",
+            "tiktok_error": error_data.get("error"),
+            "error_description": error_data.get("error_description"),
+            "log_id": error_data.get("log_id"),
+        }), 502
+    except Exception as exc:
+        return jsonify({
+            "error": "token_exchange_failed",
+            "reason": type(exc).__name__,
+        }), 502
     return jsonify({
         "status": "authorized",
         "scope": token.get("scope", ""),
