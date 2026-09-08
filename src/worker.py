@@ -153,8 +153,18 @@ async def _refresh_token(runtime_env):
 async def _daily_upload(runtime_env):
     raw_queue = await runtime_env.RINA_TIKTOK_KV.get(QUEUE_KEY)
     if not raw_queue:
-        return {"status": "idle", "reason": "daily_queue_empty"}
-    queue = json.loads(raw_queue)
+        queue = {
+            "video_url": DEFAULT_DAILY_VIDEO_URL,
+            "title": "RINA daily video",
+            "privacy_level": "PUBLIC_TO_EVERYONE",
+            "disable_duet": False,
+            "disable_comment": False,
+            "disable_stitch": False,
+            "is_aigc": True,
+            "last_uploaded_date": None,
+        }
+    else:
+        queue = json.loads(raw_queue)
     today = datetime.now(timezone.utc).date().isoformat()
     if queue.get("last_uploaded_date") == today:
         return {"status": "already_done", "date": today}
