@@ -150,6 +150,17 @@ async def _refresh_token(runtime_env):
     return new_token["access_token"], None
 
 
+async def _publish_status(runtime_env, access_token, publish_id):
+    status_code, data = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+        json_body={"publish_id": publish_id},
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if status_code >= 400 or data.get("error", {}).get("code") != "ok":
+        return None, data.get("error", {}).get("message") or data.get("error", {}).get("code") or "status_fetch_failed"
+    return data.get("data", {}).get("status"), None
+
+
 async def _daily_upload(runtime_env):
     raw_queue = await runtime_env.RINA_TIKTOK_KV.get(QUEUE_KEY)
     if not raw_queue:
@@ -171,6 +182,25 @@ async def _daily_upload(runtime_env):
     access_token, error = await _refresh_token(runtime_env)
     if not access_token:
         return {"status": "blocked", "reason": error}
+
+    # Resume a previously submitted post before creating another one.
+    pending_publish_id = queue.get("last_publish_id")
+    pending_status = queue.get("last_publish_status")
+    if pending_publish_id and pending_status not in ("PUBLISH_COMPLETE", "FAILED", "ERROR"):
+        current_status, status_error = await _publish_status(runtime_env, access_token, pending_publish_id)
+        if status_error:
+            return {"status": "pending", "publish_id": pending_publish_id, "reason": status_error}
+        queue["last_publish_status"] = current_status
+        if current_status == "PUBLISH_COMPLETE":
+            queue["last_uploaded_date"] = queue.get("last_publish_date") or today
+            await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+            return {"status": "publish_complete", "date": queue["last_uploaded_date"], "publish_id": pending_publish_id}
+        if current_status in ("FAILED", "ERROR"):
+            await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+            return {"status": "failed", "publish_id": pending_publish_id, "publish_status": current_status}
+        await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+        return {"status": "processing", "publish_id": pending_publish_id, "publish_status": current_status}
+
     video_url = queue.get("video_url") or _env_value("TIKTOK_DAILY_VIDEO_URL", runtime_env) or DEFAULT_DAILY_VIDEO_URL
     title = str(queue.get("title") or "RINA daily video").strip()[:2200]
     creator_status, creator_data = await _http_post(
@@ -210,10 +240,29 @@ async def _daily_upload(runtime_env):
             "error": data.get("error", {}).get("code"),
             "message": data.get("error", {}).get("message"),
         }
-    queue["last_uploaded_date"] = today
-    queue["last_publish_id"] = data.get("data", {}).get("publish_id")
+    publish_id = data.get("data", {}).get("publish_id")
+    if not publish_id:
+        return {"status": "failed", "reason": "publish_id_missing"}
+
+    # Do not mark the day complete until TikTok confirms PUBLISH_COMPLETE.
+    queue["last_publish_id"] = publish_id
+    queue["last_publish_status"] = "PROCESSING_UPLOAD"
+    queue["last_publish_date"] = today
     await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
-    return {"status": "direct_post_submitted", "date": today, "publish_id": queue["last_publish_id"]}
+
+    current_status, status_error = await _publish_status(runtime_env, access_token, publish_id)
+    if status_error:
+        return {"status": "processing", "date": today, "publish_id": publish_id, "reason": status_error}
+    queue["last_publish_status"] = current_status
+    if current_status == "PUBLISH_COMPLETE":
+        queue["last_uploaded_date"] = today
+        await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+        return {"status": "publish_complete", "date": today, "publish_id": publish_id}
+    if current_status in ("FAILED", "ERROR"):
+        await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+        return {"status": "failed", "date": today, "publish_id": publish_id, "publish_status": current_status}
+    await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
+    return {"status": "processing", "date": today, "publish_id": publish_id, "publish_status": current_status}
 
 
 @app.get("/health")
