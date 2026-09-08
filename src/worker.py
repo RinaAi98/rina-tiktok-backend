@@ -19,7 +19,12 @@ def _env_value(name):
     try:
         env = request.environ.get("workers.env")
         if env is not None:
-            value = getattr(env, name, None)
+            try:
+                value = env.get(name)
+            except AttributeError:
+                value = None
+            if value is None:
+                value = getattr(env, name, None)
             if value is not None:
                 return str(value)
     except Exception:
