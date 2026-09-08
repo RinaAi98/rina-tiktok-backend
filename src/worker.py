@@ -90,13 +90,15 @@ async def tiktok_callback():
     state = request.args.get("state", "")
     if not code or not verify_state(state, state_secret):
         return jsonify({"error": "invalid_oauth_state_or_code"}), 400
-    body = urllib.parse.urlencode({
+
+    body = urlencode({
         "client_key": client_key,
         "client_secret": client_secret,
         "code": code,
         "grant_type": "authorization_code",
         "redirect_uri": redirect_uri,
     })
+
     try:
         import httpx
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -123,17 +125,7 @@ async def tiktok_callback():
             "reason": type(exc).__name__,
             "detail": str(exc),
         }), 502
-    return jsonify({
-            "error": "token_exchange_failed",
-            "tiktok_error": error_data.get("error"),
-            "error_description": error_data.get("error_description"),
-            "log_id": error_data.get("log_id"),
-        }), 502
-    except Exception as exc:
-        return jsonify({
-            "error": "token_exchange_failed",
-            "reason": type(exc).__name__,
-        }), 502
+
     return jsonify({
         "status": "authorized",
         "scope": token.get("scope", ""),
