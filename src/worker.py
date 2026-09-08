@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-import httpx
+from js import fetch
 from flask import Flask, jsonify, redirect, request
 from pyodide.ffi import run_sync
 from workers import WorkerEntrypoint, wsgi
@@ -104,6 +104,16 @@ def verify_state(state, state_secret):
         return False
 
 
+async def _http_post(url, *, content=None, json_body=None, headers=None):
+    options = {"method": "POST", "headers": headers or {}}
+    if json_body is not None:
+        options["body"] = json.dumps(json_body)
+    elif content is not None:
+        options["body"] = content
+    response = await fetch(url, options)
+    return response.status, await response.json()
+
+
 async def _refresh_token(runtime_env):
     client_key, client_secret, _, _ = _config(runtime_env)
     raw = await runtime_env.RINA_TIKTOK_KV.get(TOKEN_KEY)
@@ -121,14 +131,12 @@ async def _refresh_token(runtime_env):
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
     })
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.post(
-            "https://open.tiktokapis.com/v2/oauth/token/",
-            content=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    data = response.json()
-    if response.status_code >= 400 or data.get("error"):
+    status_code, data = await _http_post(
+        "https://open.tiktokapis.com/v2/oauth/token/",
+        content=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if status_code >= 400 or data.get("error"):
         return None, data.get("error_description") or data.get("error") or "refresh_failed"
     new_token = {
         "access_token": data.get("access_token"),
@@ -155,68 +163,47 @@ async def _daily_upload(runtime_env):
         return {"status": "blocked", "reason": error}
     video_url = queue.get("video_url") or _env_value("TIKTOK_DAILY_VIDEO_URL", runtime_env) or DEFAULT_DAILY_VIDEO_URL
     title = str(queue.get("title") or "RINA daily video").strip()[:2200]
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        creator_response = await client.post(
-            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        creator_data = creator_response.json()
-        if creator_response.status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
-            return {
-                "status": "blocked",
-                "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
-                "message": creator_data.get("error", {}).get("message"),
-            }
-        privacy_options = creator_data.get("data", {}).get("privacy_level_options", [])
-        privacy_level = queue.get("privacy_level") or _env_value("TIKTOK_PRIVACY_LEVEL", runtime_env) or "SELF_ONLY"
-        if privacy_level not in privacy_options:
-            return {
-                "status": "blocked",
-                "reason": "privacy_level_not_allowed",
-                "requested": privacy_level,
-                "allowed": privacy_options,
-            }
-        payload = {
-            "post_info": {
-                "title": title,
-                "privacy_level": privacy_level,
-                "disable_duet": bool(queue.get("disable_duet", False)),
-                "disable_comment": bool(queue.get("disable_comment", False)),
-                "disable_stitch": bool(queue.get("disable_stitch", False)),
-                "is_aigc": bool(queue.get("is_aigc", False)),
-            },
-            "source_info": {
-                "source": "PULL_FROM_URL",
-                "video_url": video_url,
-            },
+    creator_status, creator_data = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if creator_status >= 400 or creator_data.get("error", {}).get("code") != "ok":
+        return {
+            "status": "blocked",
+            "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
+            "message": creator_data.get("error", {}).get("message"),
         }
-        response = await client.post(
-            "https://open.tiktokapis.com/v2/post/publish/video/init/",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-        )
-    data = response.json()
-    if response.status_code >= 400 or data.get("error", {}).get("code") != "ok":
+    privacy_options = creator_data.get("data", {}).get("privacy_level_options", [])
+    privacy_level = queue.get("privacy_level") or _env_value("TIKTOK_PRIVACY_LEVEL", runtime_env) or "SELF_ONLY"
+    if privacy_level not in privacy_options:
+        return {"status": "blocked", "reason": "privacy_level_not_allowed", "requested": privacy_level, "allowed": privacy_options}
+    payload = {
+        "post_info": {
+            "title": title,
+            "privacy_level": privacy_level,
+            "disable_duet": bool(queue.get("disable_duet", False)),
+            "disable_comment": bool(queue.get("disable_comment", False)),
+            "disable_stitch": bool(queue.get("disable_stitch", False)),
+            "is_aigc": bool(queue.get("is_aigc", False)),
+        },
+        "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
+    }
+    status_code, data = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        json_body=payload,
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if status_code >= 400 or data.get("error", {}).get("code") != "ok":
         return {
             "status": "failed",
-            "http_status": response.status_code,
+            "http_status": status_code,
             "error": data.get("error", {}).get("code"),
             "message": data.get("error", {}).get("message"),
         }
     queue["last_uploaded_date"] = today
     queue["last_publish_id"] = data.get("data", {}).get("publish_id")
     await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
-    return {
-        "status": "direct_post_submitted",
-        "date": today,
-        "publish_id": queue["last_publish_id"],
-    }
+    return {"status": "direct_post_submitted", "date": today, "publish_id": queue["last_publish_id"]}
 
 
 @app.get("/health")
@@ -268,14 +255,12 @@ def tiktok_callback():
         "redirect_uri": redirect_uri,
     })
     try:
-        with httpx.Client(timeout=20.0) as client:
-            response = client.post(
-                "https://open.tiktokapis.com/v2/oauth/token/",
-                content=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-        token = response.json()
-        if response.status_code >= 400 or token.get("error"):
+        status_code, token = run_sync(_http_post(
+            "https://open.tiktokapis.com/v2/oauth/token/",
+            content=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ))
+        if status_code >= 400 or token.get("error"):
             return jsonify({
                 "error": "token_exchange_failed",
                 "tiktok_error": token.get("error"),
