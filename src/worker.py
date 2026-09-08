@@ -16,6 +16,7 @@ app = Flask(__name__)
 KV_NAME = "RINA_TIKTOK_KV"
 TOKEN_KEY = "tiktok/token/v1"
 QUEUE_KEY = "tiktok/daily/v1"
+DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 
 
 def _request_env():
@@ -152,9 +153,7 @@ async def _daily_upload(runtime_env):
     access_token, error = await _refresh_token(runtime_env)
     if not access_token:
         return {"status": "blocked", "reason": error}
-    video_url = queue.get("video_url")
-    if not video_url:
-        return {"status": "blocked", "reason": "video_url_missing"}
+    video_url = queue.get("video_url") or _env_value("TIKTOK_DAILY_VIDEO_URL", runtime_env) or DEFAULT_DAILY_VIDEO_URL
     payload = {
         "source_info": {
             "source": "PULL_FROM_URL",
