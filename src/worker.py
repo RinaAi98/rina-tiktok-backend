@@ -9,24 +9,17 @@ from urllib.parse import urlencode
 import urllib.parse
 import urllib.request
 from flask import Flask, jsonify, redirect, request
-from workers import wsgi
+from workers import env, wsgi
 
 app = Flask(__name__)
 
 
 def _env_value(name):
-    """Read Cloudflare Worker bindings exposed by the WSGI adapter."""
+    """Read Cloudflare Worker bindings from the Python Workers env object."""
     try:
-        env = request.environ.get("workers.env")
-        if env is not None:
-            try:
-                value = env.get(name)
-            except AttributeError:
-                value = None
-            if value is None:
-                value = getattr(env, name, None)
-            if value is not None:
-                return str(value)
+        value = getattr(env, name, None)
+        if value is not None:
+            return str(value)
     except Exception:
         pass
     return os.getenv(name, "")
