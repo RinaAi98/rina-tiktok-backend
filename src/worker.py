@@ -6,9 +6,6 @@ import os
 import time
 from urllib.parse import urlencode
 
-import urllib.error
-import urllib.parse
-import urllib.request
 from flask import Flask, jsonify, redirect, request
 from workers import env, wsgi
 
@@ -87,7 +84,7 @@ def tiktok_login():
 
 
 @app.get("/tiktok/callback")
-def tiktok_callback():
+async def tiktok_callback():
     client_key, client_secret, redirect_uri, state_secret = _config()
     code = request.args.get("code", "")
     state = request.args.get("state", "")
@@ -99,23 +96,34 @@ def tiktok_callback():
         "code": code,
         "grant_type": "authorization_code",
         "redirect_uri": redirect_uri,
-    }).encode()
+    })
     try:
-        req = urllib.request.Request(
-            "https://open.tiktokapis.com/v2/oauth/token/",
-            data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=20) as response:
-            token = json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        raw_error = exc.read().decode("utf-8", errors="replace")
+        import httpx
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                content=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
         try:
-            error_data = json.loads(raw_error)
+            token = response.json()
         except Exception:
-            error_data = {}
+            token = {}
+        if response.status_code >= 400:
+            return jsonify({
+                "error": "token_exchange_failed",
+                "tiktok_error": token.get("error"),
+                "error_description": token.get("error_description"),
+                "log_id": token.get("log_id"),
+                "http_status": response.status_code,
+            }), 502
+    except Exception as exc:
         return jsonify({
+            "error": "token_exchange_failed",
+            "reason": type(exc).__name__,
+            "detail": str(exc),
+        }), 502
+    return jsonify({
             "error": "token_exchange_failed",
             "tiktok_error": error_data.get("error"),
             "error_description": error_data.get("error_description"),
