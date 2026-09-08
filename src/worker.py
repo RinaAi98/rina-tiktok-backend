@@ -154,15 +154,47 @@ async def _daily_upload(runtime_env):
     if not access_token:
         return {"status": "blocked", "reason": error}
     video_url = queue.get("video_url") or _env_value("TIKTOK_DAILY_VIDEO_URL", runtime_env) or DEFAULT_DAILY_VIDEO_URL
-    payload = {
-        "source_info": {
-            "source": "PULL_FROM_URL",
-            "video_url": video_url,
-        }
-    }
+    title = str(queue.get("title") or "RINA daily video").strip()[:2200]
     async with httpx.AsyncClient(timeout=30.0) as client:
+        creator_response = await client.post(
+            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        creator_data = creator_response.json()
+        if creator_response.status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
+            return {
+                "status": "blocked",
+                "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
+                "message": creator_data.get("error", {}).get("message"),
+            }
+        privacy_options = creator_data.get("data", {}).get("privacy_level_options", [])
+        privacy_level = queue.get("privacy_level") or _env_value("TIKTOK_PRIVACY_LEVEL", runtime_env) or "SELF_ONLY"
+        if privacy_level not in privacy_options:
+            return {
+                "status": "blocked",
+                "reason": "privacy_level_not_allowed",
+                "requested": privacy_level,
+                "allowed": privacy_options,
+            }
+        payload = {
+            "post_info": {
+                "title": title,
+                "privacy_level": privacy_level,
+                "disable_duet": bool(queue.get("disable_duet", False)),
+                "disable_comment": bool(queue.get("disable_comment", False)),
+                "disable_stitch": bool(queue.get("disable_stitch", False)),
+                "is_aigc": bool(queue.get("is_aigc", False)),
+            },
+            "source_info": {
+                "source": "PULL_FROM_URL",
+                "video_url": video_url,
+            },
+        }
         response = await client.post(
-            "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/",
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
             json=payload,
             headers={
                 "Authorization": f"Bearer {access_token}",
@@ -181,7 +213,7 @@ async def _daily_upload(runtime_env):
     queue["last_publish_id"] = data.get("data", {}).get("publish_id")
     await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
     return {
-        "status": "uploaded_to_inbox",
+        "status": "direct_post_submitted",
         "date": today,
         "publish_id": queue["last_publish_id"],
     }
@@ -278,10 +310,27 @@ def daily_queue():
         return jsonify({"error": "kv_not_configured"}), 503
     body = request.get_json(silent=True) or {}
     video_url = str(body.get("video_url", "")).strip()
-    title = str(body.get("title", "RINA daily video")).strip()
+    title = str(body.get("title", "RINA daily video")).strip()[:2200]
+    privacy_level = str(body.get("privacy_level", "")).strip()
     if not video_url.startswith("https://"):
         return jsonify({"error": "video_url_must_be_https"}), 400
-    queue = {"video_url": video_url, "title": title, "last_uploaded_date": None}
+    if privacy_level and privacy_level not in {
+        "PUBLIC_TO_EVERYONE",
+        "MUTUAL_FOLLOW_FRIENDS",
+        "FOLLOWER_OF_CREATOR",
+        "SELF_ONLY",
+    }:
+        return jsonify({"error": "invalid_privacy_level"}), 400
+    queue = {
+        "video_url": video_url,
+        "title": title,
+        "privacy_level": privacy_level or "SELF_ONLY",
+        "disable_duet": bool(body.get("disable_duet", False)),
+        "disable_comment": bool(body.get("disable_comment", False)),
+        "disable_stitch": bool(body.get("disable_stitch", False)),
+        "is_aigc": bool(body.get("is_aigc", False)),
+        "last_uploaded_date": None,
+    }
     _kv_put(QUEUE_KEY, json.dumps(queue))
     return jsonify({"status": "queued", "daily": True})
 

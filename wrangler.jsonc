@@ -4,6 +4,12 @@
   "main": "src/worker.py",
   "compatibility_date": "2026-09-07",
   "compatibility_flags": ["python_workers"],
+  "kv_namespaces": [
+    {
+      "binding": "RINA_TIKTOK_KV",
+      "id": "d8a3b35199fe4b68bb8c044e1d565208"
+    }
+  ],
   "vars": {
     "TIKTOK_REDIRECT_URI": "https://rina-tiktok-backend.rinaolivia2531.workers.dev/tiktok/callback"
   },

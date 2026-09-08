@@ -9,6 +9,8 @@ and webhook handling. The production target is Cloudflare Workers Python.
 - `GET /tiktok/login` — OAuth authorization redirect
 - `GET /tiktok/callback` — OAuth callback
 - `POST /tiktok/webhook` — signed webhook receiver
+- `POST /tiktok/daily-queue` — authenticated daily video queue
+- `GET /tiktok/automation/status` — automation readiness
 
 ## Cloudflare Workers
 
