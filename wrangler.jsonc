@@ -3,5 +3,8 @@
   "name": "rina-tiktok-backend",
   "main": "src/worker.py",
   "compatibility_date": "2026-09-07",
-  "compatibility_flags": ["python_workers"]
+  "compatibility_flags": ["python_workers"],
+  "vars": {
+    "TIKTOK_REDIRECT_URI": "https://rina-tiktok-backend.rinaolivia2531.workers.dev/tiktok/callback"
+  }
 }
