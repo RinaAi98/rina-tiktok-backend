@@ -337,9 +337,10 @@ def automation_status():
     token = _kv_get(TOKEN_KEY) or ""
     queue = _kv_get(QUEUE_KEY) or ""
     return jsonify({
-        "status": "ready" if token and queue else "waiting",
+        "status": "ready" if token else "waiting",
         "token_saved": bool(token),
         "daily_queue_saved": bool(queue),
+        "default_daily_media": DEFAULT_DAILY_VIDEO_URL,
     })
 
 
