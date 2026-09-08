@@ -64,7 +64,18 @@ def verify_state(state, state_secret):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "rina-tiktok-backend"})
+    client_key, client_secret, redirect_uri, state_secret = _config()
+    return jsonify({
+        "status": "ok",
+        "service": "rina-tiktok-backend",
+        "oauth_configured": all([client_key, client_secret, redirect_uri, state_secret]),
+        "bindings": {
+            "client_key": bool(client_key),
+            "client_secret": bool(client_secret),
+            "redirect_uri": bool(redirect_uri),
+            "state_secret": bool(state_secret),
+        },
+    })
 
 
 @app.get("/tiktok/login")
