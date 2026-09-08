@@ -13,25 +13,42 @@ from workers import wsgi
 
 app = Flask(__name__)
 
-CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "")
-CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "")
-REDIRECT_URI = os.getenv("TIKTOK_REDIRECT_URI", "")
-STATE_SECRET = os.getenv("TIKTOK_STATE_SECRET", "")
+
+def _env_value(name):
+    """Read Cloudflare Worker bindings exposed by the WSGI adapter."""
+    try:
+        env = request.environ.get("workers.env")
+        if env is not None:
+            value = getattr(env, name, None)
+            if value is not None:
+                return str(value)
+    except Exception:
+        pass
+    return os.getenv(name, "")
 
 
-def make_state():
+def _config():
+    return (
+        _env_value("TIKTOK_CLIENT_KEY"),
+        _env_value("TIKTOK_CLIENT_SECRET"),
+        _env_value("TIKTOK_REDIRECT_URI"),
+        _env_value("TIKTOK_STATE_SECRET"),
+    )
+
+
+def make_state(state_secret):
     payload = f"{int(time.time())}.{os.urandom(16).hex()}"
-    sig = hmac.new(STATE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(state_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
     raw = f"{payload}.{sig}".encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def verify_state(state):
+def verify_state(state, state_secret):
     try:
         raw = base64.urlsafe_b64decode(state + "=" * (-len(state) % 4)).decode()
         ts, nonce, sig = raw.rsplit(".", 2)
         payload = f"{ts}.{nonce}"
-        expected = hmac.new(STATE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        expected = hmac.new(state_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(sig, expected) and abs(time.time() - int(ts)) <= 600
     except Exception:
         return False
@@ -44,14 +61,15 @@ def health():
 
 @app.get("/tiktok/login")
 def tiktok_login():
-    if not CLIENT_KEY or not REDIRECT_URI or not STATE_SECRET:
+    client_key, _, redirect_uri, state_secret = _config()
+    if not client_key or not redirect_uri or not state_secret:
         return jsonify({"error": "backend_not_configured"}), 500
-    state = make_state()
+    state = make_state(state_secret)
     params = {
-        "client_key": CLIENT_KEY,
+        "client_key": client_key,
         "response_type": "code",
         "scope": "user.info.basic,video.publish,video.upload,video.list",
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "state": state,
     }
     return redirect("https://www.tiktok.com/v2/auth/authorize/?" + urlencode(params))
@@ -59,16 +77,17 @@ def tiktok_login():
 
 @app.get("/tiktok/callback")
 def tiktok_callback():
+    client_key, client_secret, redirect_uri, state_secret = _config()
     code = request.args.get("code", "")
     state = request.args.get("state", "")
-    if not code or not verify_state(state):
+    if not code or not verify_state(state, state_secret):
         return jsonify({"error": "invalid_oauth_state_or_code"}), 400
     body = urllib.parse.urlencode({
-        "client_key": CLIENT_KEY,
-        "client_secret": CLIENT_SECRET,
+        "client_key": client_key,
+        "client_secret": client_secret,
         "code": code,
         "grant_type": "authorization_code",
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
     }).encode()
     try:
         req = urllib.request.Request(
@@ -81,7 +100,6 @@ def tiktok_callback():
             token = json.loads(response.read().decode())
     except Exception:
         return jsonify({"error": "token_exchange_failed"}), 502
-    # Never persist or expose client secrets. Return only a safe success page.
     return jsonify({
         "status": "authorized",
         "scope": token.get("scope", ""),
@@ -92,6 +110,7 @@ def tiktok_callback():
 
 @app.post("/tiktok/webhook")
 def tiktok_webhook():
+    _, client_secret, _, _ = _config()
     raw = request.get_data()
     signature = request.headers.get("TikTok-Signature", "")
     try:
@@ -100,7 +119,7 @@ def tiktok_webhook():
         sig = parts.get("s", "")
         if abs(time.time() - int(ts)) > 300:
             return jsonify({"error": "stale_signature"}), 401
-        expected = hmac.new(CLIENT_SECRET.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
+        expected = hmac.new(client_secret.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return jsonify({"error": "invalid_signature"}), 401
     except Exception:
