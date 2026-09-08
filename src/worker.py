@@ -23,6 +23,18 @@ def _env_value(name):
             return str(value)
     except Exception:
         pass
+    try:
+        value = env.get(name)
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        value = env[name]
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
     return os.getenv(name, "")
 
 
