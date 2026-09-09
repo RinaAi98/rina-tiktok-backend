@@ -7,10 +7,9 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse, parse_qs
 
-from js import fetch
 from flask import Flask, jsonify, redirect, request
 from pyodide.ffi import run_sync
-from workers import WorkerEntrypoint, Response, wsgi
+from workers import WorkerEntrypoint, Response, fetch, wsgi
 
 app = Flask(__name__)
 KV_NAME = "RINA_TIKTOK_KV"
@@ -544,8 +543,6 @@ async def _tiktok_callback_native(request, env):
     params = parse_qs(urlparse(request.url).query)
     code = params.get("code", [""])[0]
     state = params.get("state", [""])[0]
-    if params.get("debug", [""])[0] == "1":
-        return Response("native_callback_reached", headers={"content-type": "text/plain"})
     if not code or not verify_state(state, state_secret):
         return Response.json({"error": "invalid_oauth_state_or_code"}, status=400)
     body = urlencode({
