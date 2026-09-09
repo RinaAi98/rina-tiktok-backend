@@ -589,7 +589,10 @@ async def _tiktok_callback_native(request, env):
 
 async def _tiktok_preflight_native(env):
     """Async preflight path; avoids WSGI run_sync for network/KV I/O."""
-    raw_token = await env.RINA_TIKTOK_KV.get(TOKEN_KEY)
+    try:
+        raw_token = await env.RINA_TIKTOK_KV.get(TOKEN_KEY)
+    except Exception as exc:
+        return Response.json({"status": "blocked", "reason": "kv_get_" + type(exc).__name__}, status=502)
     if not raw_token:
         return Response.json({"status": "blocked", "reason": "token_missing"}, status=401)
     try:
