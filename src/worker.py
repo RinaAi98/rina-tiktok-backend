@@ -555,7 +555,9 @@ async def _tiktok_callback_native(request, env):
     try:
         response = await fetch(
             "https://open.tiktokapis.com/v2/oauth/token/",
-            {"method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "body": body},
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=body,
         )
         text = await response.text()
         try:
