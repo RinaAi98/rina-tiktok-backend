@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse, parse_qs
 
 from flask import Flask, jsonify, redirect, request
-from pyodide.ffi import run_sync
+from pyodide.ffi import run_sync, to_js
+from js import Object, fetch as js_fetch
 from workers import WorkerEntrypoint, Response, fetch, wsgi
 
 app = Flask(__name__)
@@ -18,7 +19,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-10-fetch-null-fix-v9"
+BUILD_VERSION = "2026-09-10-js-fetch-v10"
 
 
 def _request_env():
@@ -106,11 +107,12 @@ def verify_state(state, state_secret):
         return False
 
 
+def _to_js(value):
+    return to_js(value, dict_converter=Object.fromEntries)
+
+
 async def _http_head(url):
-    response = await fetch(url, {"method": "HEAD"})
-    # Keep this probe intentionally minimal: some external origins expose
-    # non-standard HEAD metadata through the Workers FFI. TikTok itself
-    # validates the media URL during PULL_FROM_URL initialization.
+    response = await js_fetch(url, _to_js({"method": "HEAD"}))
     return response.status, {}
 
 
@@ -124,7 +126,7 @@ async def _http_post(url, *, content=None, json_body=None, headers=None):
     options = {"method": "POST", "headers": request_headers}
     if body is not None:
         options["body"] = body
-    response = await fetch(url, options)
+    response = await js_fetch(url, _to_js(options))
     text = await response.text()
     try:
         payload = json.loads(text) if text else {}
