@@ -18,7 +18,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-09-audit-v2"
+BUILD_VERSION = "2026-09-09-audit-v3"
 
 
 def _request_env():
