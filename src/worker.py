@@ -18,7 +18,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-10-fetch-options-v6"
+BUILD_VERSION = "2026-09-10-preflight-v7"
 
 
 def _request_env():
@@ -468,19 +468,10 @@ def tiktok_preflight():
     maximum = creator.get("max_video_post_duration_sec")
     if duration and maximum and float(duration) > float(maximum):
         reasons.append("duration_exceeds_creator_limit")
-    try:
-        media_status, media_headers = run_sync(_http_head(video_url))
-        content_type = str(media_headers.get("content-type", ""))
-        content_length = media_headers.get("content-length")
-        if media_status >= 400:
-            reasons.append("media_url_unreachable")
-        if content_type and "video/" not in content_type.lower():
-            reasons.append("media_content_type_invalid")
-        if content_length and int(content_length) > MAX_VIDEO_SIZE_BYTES:
-            reasons.append("media_too_large")
-    except Exception:
-        media_status, content_type, content_length = None, "", None
-        reasons.append("media_probe_failed")
+    media_status, content_type, content_length = None, "", None
+    # Do not perform an outbound media probe from the Flask/WSGI preflight.
+    # The actual TikTok PULL_FROM_URL request performs the authoritative URL
+    # validation; preflight remains read-only and avoids WSGI/async FFI issues.
     return jsonify({
         "status": "ready" if not reasons else "blocked",
         "creator": {
