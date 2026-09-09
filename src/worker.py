@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 from flask import Flask, jsonify, redirect, request
 from pyodide.ffi import run_sync, to_js
 from js import Object, fetch as js_fetch
-from workers import WorkerEntrypoint, Response, fetch, wsgi
+from workers import WorkerEntrypoint, Response, wsgi
 
 app = Flask(__name__)
 KV_NAME = "RINA_TIKTOK_KV"
@@ -551,18 +551,12 @@ async def _tiktok_callback_native(request, env):
         "redirect_uri": redirect_uri,
     })
     try:
-        response = await fetch(
+        response_status, token = await _http_post(
             "https://open.tiktokapis.com/v2/oauth/token/",
-            method="POST",
+            content=body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            body=body,
         )
-        text = await response.text()
-        try:
-            token = json.loads(text) if text else {}
-        except Exception:
-            token = {"raw": text}
-        if response.status >= 400 or token.get("error"):
+        if response_status >= 400 or token.get("error"):
             return Response.json({
                 "error": "token_exchange_failed",
                 "tiktok_error": token.get("error"),
