@@ -18,7 +18,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-09-audit-v3"
+BUILD_VERSION = "2026-09-10-fetch-options-v4"
 
 
 def _request_env():
@@ -118,12 +118,11 @@ async def _http_post(url, *, content=None, json_body=None, headers=None):
         body = json.dumps(json_body)
     elif content is not None:
         body = content
-    response = await fetch(
-        url,
-        method="POST",
-        headers=request_headers,
-        body=body,
-    )
+    response = await fetch(url, {
+        "method": "POST",
+        "headers": request_headers,
+        "body": body,
+    })
     text = await response.text()
     try:
         payload = json.loads(text) if text else {}
