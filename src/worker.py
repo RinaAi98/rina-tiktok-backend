@@ -119,7 +119,14 @@ async def _http_post(url, *, content=None, json_body=None, headers=None):
     elif content is not None:
         options["body"] = content
     response = await fetch(url, options)
-    return response.status, await response.json()
+    # Avoid returning a JSProxy from response.json() across the Flask/WSGI
+    # sync bridge. Convert the response body to plain Python JSON first.
+    text = await response.text()
+    try:
+        payload = json.loads(text) if text else {}
+    except Exception:
+        payload = {"raw": text}
+    return response.status, payload
 
 
 async def _refresh_token(runtime_env):
