@@ -19,6 +19,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
+BUILD_VERSION = "2026-09-09-audit-v2"
 
 
 def _request_env():
@@ -104,6 +105,11 @@ def verify_state(state, state_secret):
         return hmac.compare_digest(sig, expected) and abs(time.time() - int(ts)) <= 600
     except Exception:
         return False
+
+
+async def _http_head(url):
+    response = await fetch(url, {"method": "HEAD"})
+    return response.status, dict(response.headers)
 
 
 async def _http_post(url, *, content=None, json_body=None, headers=None):
@@ -289,6 +295,7 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "rina-tiktok-backend",
+        "build_version": BUILD_VERSION,
         "oauth_configured": all([client_key, client_secret, redirect_uri, state_secret]),
         "daily_automation": bool(_kv()),
         "bindings": {
@@ -407,13 +414,20 @@ def tiktok_preflight():
     """Read-only readiness check; never initializes a TikTok post."""
     if not _kv():
         return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
-    # Token refresh is allowed here because it does not publish content.
+    # Read the stored token only. Preflight must be read-only and must not mutate
+    # the token/session while checking tomorrow's publish readiness.
+    raw_token = _kv_get(TOKEN_KEY) or ""
+    if not raw_token:
+        return jsonify({"status": "blocked", "reason": "token_missing"}), 401
     try:
-        token, token_error = run_sync(_refresh_token(_request_env()))
-    except Exception as exc:
-        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
+        token_record = json.loads(raw_token)
+    except Exception:
+        return jsonify({"status": "blocked", "reason": "token_record_invalid"}), 502
+    token = token_record.get("access_token")
     if not token:
-        return jsonify({"status": "blocked", "reason": token_error or "token_missing"}), 401
+        return jsonify({"status": "blocked", "reason": "access_token_missing"}), 401
+    if int(token_record.get("expires_at", 0) or 0) <= int(time.time()):
+        return jsonify({"status": "blocked", "reason": "access_token_expired"}), 401
     try:
         status_code, creator_data = run_sync(_http_post(
             "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
@@ -432,6 +446,7 @@ def tiktok_preflight():
     queue = json.loads(raw_queue) if raw_queue else {"video_url": DEFAULT_DAILY_VIDEO_URL, "privacy_level": "SELF_ONLY"}
     allowed = creator.get("privacy_level_options", [])
     requested = queue.get("privacy_level") or "SELF_ONLY"
+    video_url = queue.get("video_url") or DEFAULT_DAILY_VIDEO_URL
     reasons = []
     if requested not in allowed:
         reasons.append("privacy_level_not_allowed")
@@ -441,6 +456,19 @@ def tiktok_preflight():
     maximum = creator.get("max_video_post_duration_sec")
     if duration and maximum and float(duration) > float(maximum):
         reasons.append("duration_exceeds_creator_limit")
+    try:
+        media_status, media_headers = run_sync(_http_head(video_url))
+        content_type = str(media_headers.get("content-type", ""))
+        content_length = media_headers.get("content-length")
+        if media_status >= 400:
+            reasons.append("media_url_unreachable")
+        if content_type and "video/" not in content_type.lower():
+            reasons.append("media_content_type_invalid")
+        if content_length and int(content_length) > MAX_VIDEO_SIZE_BYTES:
+            reasons.append("media_too_large")
+    except Exception:
+        media_status, content_type, content_length = None, "", None
+        reasons.append("media_probe_failed")
     return jsonify({
         "status": "ready" if not reasons else "blocked",
         "creator": {
@@ -452,11 +480,18 @@ def tiktok_preflight():
             "duet_disabled": creator.get("duet_disabled"),
             "stitch_disabled": creator.get("stitch_disabled"),
         },
+        "build_version": BUILD_VERSION,
         "queue": {
-            "video_url": queue.get("video_url"),
+            "video_url": video_url,
             "privacy_level": requested,
             "duration_sec": duration,
-            "size_bytes": queue.get("size_bytes"),
+            "size_bytes": queue.get("size_bytes") or (int(content_length) if content_length else None),
+        },
+        "media": {
+            "http_status": media_status,
+            "content_type": content_type,
+            "content_length": int(content_length) if content_length else None,
+            "url_ownership_verification_required": True,
         },
         "reasons": reasons,
         "note": "Read-only preflight; no publish request was sent.",
