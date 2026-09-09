@@ -18,7 +18,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-10-preflight-v7"
+BUILD_VERSION = "2026-09-10-native-preflight-v8"
 
 
 def _request_env():
@@ -587,10 +587,76 @@ async def _tiktok_callback_native(request, env):
         return Response.json({"error": "token_exchange_failed", "reason": type(exc).__name__}, status=502)
 
 
+async def _tiktok_preflight_native(env):
+    """Async preflight path; avoids WSGI run_sync for network/KV I/O."""
+    raw_token = await env.RINA_TIKTOK_KV.get(TOKEN_KEY)
+    if not raw_token:
+        return Response.json({"status": "blocked", "reason": "token_missing"}, status=401)
+    try:
+        token_record = json.loads(raw_token)
+    except Exception:
+        return Response.json({"status": "blocked", "reason": "token_record_invalid"}, status=502)
+    token = token_record.get("access_token")
+    if not token:
+        return Response.json({"status": "blocked", "reason": "access_token_missing"}, status=401)
+    if int(token_record.get("expires_at", 0) or 0) <= int(time.time()):
+        return Response.json({"status": "blocked", "reason": "access_token_expired"}, status=401)
+    try:
+        status_code, creator_data = await _http_post(
+            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        return Response.json({"status": "blocked", "reason": type(exc).__name__}, status=502)
+    if status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
+        return Response.json({
+            "status": "blocked",
+            "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
+            "message": creator_data.get("error", {}).get("message"),
+        }, status=502)
+    creator = creator_data.get("data", {})
+    raw_queue = await env.RINA_TIKTOK_KV.get(QUEUE_KEY)
+    queue = json.loads(raw_queue) if raw_queue else {
+        "video_url": DEFAULT_DAILY_VIDEO_URL,
+        "privacy_level": "SELF_ONLY",
+    }
+    allowed = creator.get("privacy_level_options", [])
+    requested = queue.get("privacy_level") or "SELF_ONLY"
+    reasons = []
+    if requested not in allowed:
+        reasons.append("privacy_level_not_allowed")
+    if requested == "PUBLIC_TO_EVERYONE" and "PUBLIC_TO_EVERYONE" not in allowed:
+        reasons.append("public_post_not_allowed")
+    duration = queue.get("duration_sec")
+    maximum = creator.get("max_video_post_duration_sec")
+    if duration and maximum and float(duration) > float(maximum):
+        reasons.append("duration_exceeds_creator_limit")
+    return Response.json({
+        "status": "ready" if not reasons else "blocked",
+        "build_version": BUILD_VERSION,
+        "creator": {
+            "username": creator.get("creator_username"),
+            "nickname": creator.get("creator_nickname"),
+            "privacy_level_options": allowed,
+            "max_video_post_duration_sec": maximum,
+            "comment_disabled": creator.get("comment_disabled"),
+            "duet_disabled": creator.get("duet_disabled"),
+            "stitch_disabled": creator.get("stitch_disabled"),
+        },
+        "queue": queue,
+        "media": {"url": queue.get("video_url") or DEFAULT_DAILY_VIDEO_URL},
+        "reasons": reasons,
+        "note": "Read-only preflight; no publish request was sent.",
+    })
+
+
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
-        if urlparse(request.url).path == "/tiktok/callback":
+        path = urlparse(request.url).path
+        if path == "/tiktok/callback":
             return await _tiktok_callback_native(request, self.env)
+        if path == "/tiktok/preflight":
+            return await _tiktok_preflight_native(self.env)
         return await wsgi.fetch(app, request, self.env)
 
     async def scheduled(self, controller, env, ctx):
