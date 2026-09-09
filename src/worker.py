@@ -112,14 +112,18 @@ async def _http_head(url):
 
 
 async def _http_post(url, *, content=None, json_body=None, headers=None):
-    options = {"method": "POST", "headers": headers or {}}
+    request_headers = headers or {}
+    body = None
     if json_body is not None:
-        options["body"] = json.dumps(json_body)
+        body = json.dumps(json_body)
     elif content is not None:
-        options["body"] = content
-    response = await fetch(url, options)
-    # Avoid returning a JSProxy from response.json() across the Flask/WSGI
-    # sync bridge. Convert the response body to plain Python JSON first.
+        body = content
+    response = await fetch(
+        url,
+        method="POST",
+        headers=request_headers,
+        body=body,
+    )
     text = await response.text()
     try:
         payload = json.loads(text) if text else {}
