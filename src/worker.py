@@ -18,7 +18,7 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-10-fetch-options-v5"
+BUILD_VERSION = "2026-09-10-fetch-options-v6"
 
 
 def _request_env():
@@ -108,11 +108,10 @@ def verify_state(state, state_secret):
 
 async def _http_head(url):
     response = await fetch(url, {"method": "HEAD"})
-    headers = {
-        "content-type": response.headers.get("content-type") or "",
-        "content-length": response.headers.get("content-length"),
-    }
-    return response.status, headers
+    # Keep this probe intentionally minimal: some external origins expose
+    # non-standard HEAD metadata through the Workers FFI. TikTok itself
+    # validates the media URL during PULL_FROM_URL initialization.
+    return response.status, {}
 
 
 async def _http_post(url, *, content=None, json_body=None, headers=None):
