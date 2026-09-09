@@ -5,12 +5,12 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 
 from js import fetch
 from flask import Flask, jsonify, redirect, request
 from pyodide.ffi import run_sync
-from workers import WorkerEntrypoint, wsgi
+from workers import WorkerEntrypoint, Response, wsgi
 
 app = Flask(__name__)
 KV_NAME = "RINA_TIKTOK_KV"
@@ -538,8 +538,61 @@ def tiktok_webhook():
     return jsonify({"status": "received"})
 
 
+async def _tiktok_callback_native(request, env):
+    """Native async OAuth callback; avoids Flask/WSGI sync bridging for I/O."""
+    _, client_secret, redirect_uri, state_secret = _config(env)
+    params = parse_qs(urlparse(request.url).query)
+    code = params.get("code", [""])[0]
+    state = params.get("state", [""])[0]
+    if not code or not verify_state(state, state_secret):
+        return Response.json({"error": "invalid_oauth_state_or_code"}, status=400)
+    body = urlencode({
+        "client_key": _config(env)[0],
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    })
+    try:
+        response = await fetch(
+            "https://open.tiktokapis.com/v2/oauth/token/",
+            {"method": "POST", "headers": {"Content-Type": "application/x-www-form-urlencoded"}, "body": body},
+        )
+        text = await response.text()
+        try:
+            token = json.loads(text) if text else {}
+        except Exception:
+            token = {"raw": text}
+        if response.status >= 400 or token.get("error"):
+            return Response.json({
+                "error": "token_exchange_failed",
+                "tiktok_error": token.get("error"),
+                "error_description": token.get("error_description"),
+                "log_id": token.get("log_id"),
+            }, status=502)
+        await env.RINA_TIKTOK_KV.put(TOKEN_KEY, json.dumps({
+            "access_token": token.get("access_token"),
+            "refresh_token": token.get("refresh_token"),
+            "open_id": token.get("open_id"),
+            "scope": token.get("scope", ""),
+            "expires_at": int(time.time()) + int(token.get("expires_in", 86400)),
+            "refresh_expires_at": int(time.time()) + int(token.get("refresh_expires_in", 31536000)),
+        }))
+        return Response.json({
+            "status": "authorized",
+            "persistent_session": True,
+            "scope": token.get("scope", ""),
+            "expires_in": token.get("expires_in"),
+            "message": "TikTok authorization completed successfully.",
+        })
+    except Exception as exc:
+        return Response.json({"error": "token_exchange_failed", "reason": type(exc).__name__}, status=502)
+
+
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
+        if urlparse(request.url).path == "/tiktok/callback":
+            return await _tiktok_callback_native(request, self.env)
         return await wsgi.fetch(app, request, self.env)
 
     async def scheduled(self, controller, env, ctx):
