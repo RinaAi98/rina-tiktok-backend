@@ -17,6 +17,8 @@ KV_NAME = "RINA_TIKTOK_KV"
 TOKEN_KEY = "tiktok/token/v1"
 QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
+MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_PENDING_SHARES = 5
 
 
 def _request_env():
@@ -213,10 +215,23 @@ async def _daily_upload(runtime_env):
             "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
             "message": creator_data.get("error", {}).get("message"),
         }
-    privacy_options = creator_data.get("data", {}).get("privacy_level_options", [])
+    creator = creator_data.get("data", {})
+    privacy_options = creator.get("privacy_level_options", [])
+    max_duration = int(creator.get("max_video_post_duration_sec") or 0)
     privacy_level = queue.get("privacy_level") or _env_value("TIKTOK_PRIVACY_LEVEL", runtime_env) or "SELF_ONLY"
+    # TikTok requires the latest creator settings to drive the posting decision.
+    if not privacy_options:
+        return {"status": "blocked", "reason": "creator_privacy_options_missing"}
     if privacy_level not in privacy_options:
         return {"status": "blocked", "reason": "privacy_level_not_allowed", "requested": privacy_level, "allowed": privacy_options}
+    # An unaudited client is restricted to SELF_ONLY/private posting. Never attempt
+    # a public post that TikTok will reject; this keeps the scheduler fail-closed.
+    if "PUBLIC_TO_EVERYONE" not in privacy_options and privacy_level != "SELF_ONLY":
+        return {"status": "blocked", "reason": "unaudited_or_private_creator", "allowed": privacy_options}
+    if max_duration and queue.get("duration_sec") and float(queue["duration_sec"]) > max_duration:
+        return {"status": "blocked", "reason": "video_duration_exceeds_creator_limit", "duration_sec": queue["duration_sec"], "max_duration_sec": max_duration}
+    if queue.get("size_bytes") and int(queue["size_bytes"]) > MAX_VIDEO_SIZE_BYTES:
+        return {"status": "blocked", "reason": "video_too_large", "size_bytes": queue["size_bytes"]}
     payload = {
         "post_info": {
             "title": title,
@@ -225,6 +240,9 @@ async def _daily_upload(runtime_env):
             "disable_comment": bool(queue.get("disable_comment", False)),
             "disable_stitch": bool(queue.get("disable_stitch", False)),
             "is_aigc": bool(queue.get("is_aigc", False)),
+            "brand_content_toggle": bool(queue.get("brand_content_toggle", False)),
+            "brand_organic_toggle": bool(queue.get("brand_organic_toggle", False)),
+            "video_cover_timestamp_ms": int(queue["video_cover_timestamp_ms"]) if queue.get("video_cover_timestamp_ms") is not None else None,
         },
         "source_info": {"source": "PULL_FROM_URL", "video_url": video_url},
     }
@@ -373,10 +391,76 @@ def daily_queue():
         "disable_comment": bool(body.get("disable_comment", False)),
         "disable_stitch": bool(body.get("disable_stitch", False)),
         "is_aigc": bool(body.get("is_aigc", False)),
+        "brand_content_toggle": bool(body.get("brand_content_toggle", False)),
+        "brand_organic_toggle": bool(body.get("brand_organic_toggle", False)),
+        "video_cover_timestamp_ms": body.get("video_cover_timestamp_ms"),
+        "duration_sec": body.get("duration_sec"),
+        "size_bytes": body.get("size_bytes"),
         "last_uploaded_date": None,
     }
     _kv_put(QUEUE_KEY, json.dumps(queue))
     return jsonify({"status": "queued", "daily": True})
+
+
+@app.get("/tiktok/preflight")
+def tiktok_preflight():
+    """Read-only readiness check; never initializes a TikTok post."""
+    if not _kv():
+        return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
+    # Token refresh is allowed here because it does not publish content.
+    try:
+        token, token_error = run_sync(_refresh_token(_request_env()))
+    except Exception as exc:
+        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
+    if not token:
+        return jsonify({"status": "blocked", "reason": token_error or "token_missing"}), 401
+    try:
+        status_code, creator_data = run_sync(_http_post(
+            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        ))
+    except Exception as exc:
+        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
+    if status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
+        return jsonify({
+            "status": "blocked",
+            "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
+            "message": creator_data.get("error", {}).get("message"),
+        }), 502
+    creator = creator_data.get("data", {})
+    raw_queue = _kv_get(QUEUE_KEY) or ""
+    queue = json.loads(raw_queue) if raw_queue else {"video_url": DEFAULT_DAILY_VIDEO_URL, "privacy_level": "SELF_ONLY"}
+    allowed = creator.get("privacy_level_options", [])
+    requested = queue.get("privacy_level") or "SELF_ONLY"
+    reasons = []
+    if requested not in allowed:
+        reasons.append("privacy_level_not_allowed")
+    if requested == "PUBLIC_TO_EVERYONE" and "PUBLIC_TO_EVERYONE" not in allowed:
+        reasons.append("public_post_not_allowed")
+    duration = queue.get("duration_sec")
+    maximum = creator.get("max_video_post_duration_sec")
+    if duration and maximum and float(duration) > float(maximum):
+        reasons.append("duration_exceeds_creator_limit")
+    return jsonify({
+        "status": "ready" if not reasons else "blocked",
+        "creator": {
+            "username": creator.get("creator_username"),
+            "nickname": creator.get("creator_nickname"),
+            "privacy_level_options": allowed,
+            "max_video_post_duration_sec": maximum,
+            "comment_disabled": creator.get("comment_disabled"),
+            "duet_disabled": creator.get("duet_disabled"),
+            "stitch_disabled": creator.get("stitch_disabled"),
+        },
+        "queue": {
+            "video_url": queue.get("video_url"),
+            "privacy_level": requested,
+            "duration_sec": duration,
+            "size_bytes": queue.get("size_bytes"),
+        },
+        "reasons": reasons,
+        "note": "Read-only preflight; no publish request was sent.",
+    })
 
 
 @app.get("/tiktok/automation/status")
