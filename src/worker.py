@@ -544,6 +544,8 @@ async def _tiktok_callback_native(request, env):
     params = parse_qs(urlparse(request.url).query)
     code = params.get("code", [""])[0]
     state = params.get("state", [""])[0]
+    if params.get("debug", [""])[0] == "1":
+        return Response("native_callback_reached", headers={"content-type": "text/plain"})
     if not code or not verify_state(state, state_secret):
         return Response.json({"error": "invalid_oauth_state_or_code"}, status=400)
     body = urlencode({
