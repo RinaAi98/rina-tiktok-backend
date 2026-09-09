@@ -609,7 +609,7 @@ async def _tiktok_preflight_native(env):
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
     except Exception as exc:
-        return Response.json({"status": "blocked", "reason": type(exc).__name__}, status=502)
+        return Response.json({"status": "blocked", "reason": "creator_request_" + type(exc).__name__}, status=502)
     if status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
         return Response.json({
             "status": "blocked",
