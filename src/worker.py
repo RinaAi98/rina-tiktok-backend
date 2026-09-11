@@ -810,6 +810,9 @@ class Default(WorkerEntrypoint):
                 "publish_id": result.get("publish_id"),
                 "publish_status": result.get("publish_status"),
                 "reason": result.get("reason"),
+                "http_status": result.get("http_status"),
+                "error": result.get("error"),
+                "message": result.get("message"),
             })
         return await wsgi.fetch(app, request, self.env)
 
