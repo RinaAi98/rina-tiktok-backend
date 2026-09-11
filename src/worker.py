@@ -724,21 +724,14 @@ async def _tiktok_callback_native(request, env):
 
 async def _tiktok_preflight_native(env):
     """Async preflight path; avoids WSGI run_sync for network/KV I/O."""
+    # Match the scheduled publisher: refresh an expired access token using
+    # the stored refresh token, without initializing or publishing a post.
     try:
-        raw_token = await env.RINA_TIKTOK_KV.get(TOKEN_KEY)
+        token, refresh_error = await _refresh_token(env)
     except Exception as exc:
-        return Response.json({"status": "blocked", "reason": "kv_get_" + type(exc).__name__}, status=502)
-    if not raw_token:
-        return Response.json({"status": "blocked", "reason": "token_missing"}, status=401)
-    try:
-        token_record = json.loads(raw_token)
-    except Exception:
-        return Response.json({"status": "blocked", "reason": "token_record_invalid"}, status=502)
-    token = token_record.get("access_token")
+        return Response.json({"status": "blocked", "reason": "token_refresh_" + type(exc).__name__}, status=502)
     if not token:
-        return Response.json({"status": "blocked", "reason": "access_token_missing"}, status=401)
-    if int(token_record.get("expires_at", 0) or 0) <= int(time.time()):
-        return Response.json({"status": "blocked", "reason": "access_token_expired"}, status=401)
+        return Response.json({"status": "blocked", "reason": refresh_error or "access_token_unavailable"}, status=401)
     try:
         status_code, creator_data = await _http_post(
             "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
