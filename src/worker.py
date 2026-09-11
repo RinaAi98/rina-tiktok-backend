@@ -196,6 +196,8 @@ async def _daily_upload(runtime_env):
             "is_aigc": True,
             "last_uploaded_date": None,
         }
+        # Persist the safe default so scheduled runs are stateful.
+        await runtime_env.RINA_TIKTOK_KV.put(QUEUE_KEY, json.dumps(queue))
     else:
         queue = json.loads(raw_queue)
     today = datetime.now(timezone.utc).date().isoformat()
