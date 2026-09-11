@@ -19,7 +19,8 @@ QUEUE_KEY = "tiktok/daily/v1"
 DEFAULT_DAILY_VIDEO_URL = "https://rinaai98.github.io/rina-tiktok-media/daily.mp4"
 MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
-BUILD_VERSION = "2026-09-10-js-fetch-v10"
+UPLOAD_CHUNK_MAX = 64 * 1024 * 1024
+BUILD_VERSION = "2026-09-10-upload-v2-direct"
 
 
 def _request_env():
@@ -427,20 +428,19 @@ def tiktok_preflight():
     """Read-only readiness check; never initializes a TikTok post."""
     if not _kv():
         return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
-    # Read the stored token only. Preflight must be read-only and must not mutate
-    # the token/session while checking tomorrow's publish readiness.
-    raw_token = _kv_get(TOKEN_KEY) or ""
-    if not raw_token:
-        return jsonify({"status": "blocked", "reason": "token_missing"}), 401
+    # Preflight is read-only with respect to TikTok publishing: it never
+    # initializes a post. It may refresh the OAuth access token in KV, just
+    # like the scheduled publisher, so an expired access token is not reported
+    # as a false blocker while the refresh token is still valid.
+    runtime_env = _request_env()
+    if runtime_env is None or _kv(runtime_env) is None:
+        return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
     try:
-        token_record = json.loads(raw_token)
-    except Exception:
-        return jsonify({"status": "blocked", "reason": "token_record_invalid"}), 502
-    token = token_record.get("access_token")
+        token, refresh_error = run_sync(_refresh_token(runtime_env))
+    except Exception as exc:
+        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
     if not token:
-        return jsonify({"status": "blocked", "reason": "access_token_missing"}), 401
-    if int(token_record.get("expires_at", 0) or 0) <= int(time.time()):
-        return jsonify({"status": "blocked", "reason": "access_token_expired"}), 401
+        return jsonify({"status": "blocked", "reason": refresh_error or "access_token_unavailable"}), 401
     try:
         status_code, creator_data = run_sync(_http_post(
             "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
@@ -502,6 +502,33 @@ def tiktok_preflight():
     })
 
 
+@app.get("/tiktok/oauth/status")
+def oauth_status():
+    """Read-only OAuth/token metadata; never returns token secrets."""
+    if not _kv():
+        return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
+    raw = _kv_get(TOKEN_KEY) or ""
+    if not raw:
+        return jsonify({"status": "waiting", "token_saved": False}), 200
+    try:
+        token = json.loads(raw)
+    except Exception:
+        return jsonify({"status": "blocked", "reason": "token_record_invalid"}), 502
+    expires_at = int(token.get("expires_at", 0) or 0)
+    refresh_expires_at = int(token.get("refresh_expires_at", 0) or 0)
+    now = int(time.time())
+    return jsonify({
+        "status": "ready",
+        "token_saved": bool(token.get("access_token")),
+        "open_id": token.get("open_id"),
+        "scope": token.get("scope", ""),
+        "expires_at": expires_at,
+        "expires_in_sec": max(0, expires_at - now),
+        "refresh_expires_at": refresh_expires_at,
+        "refresh_expires_in_sec": max(0, refresh_expires_at - now),
+    })
+
+
 @app.get("/tiktok/automation/status")
 def automation_status():
     if not _kv():
@@ -514,6 +541,119 @@ def automation_status():
         "daily_queue_saved": bool(queue),
         "default_daily_media": DEFAULT_DAILY_VIDEO_URL,
     })
+
+
+async def _tiktok_file_upload(runtime_env, video_bytes, title, privacy_level, content_type):
+    access_token, error = await _refresh_token(runtime_env)
+    if not access_token:
+        return {"status": "blocked", "reason": error}, 401
+    size = len(video_bytes)
+    if size <= 0:
+        return {"status": "blocked", "reason": "empty_video"}, 400
+    if size > UPLOAD_CHUNK_MAX:
+        return {"status": "blocked", "reason": "video_too_large_for_current_worker_upload", "max_bytes": UPLOAD_CHUNK_MAX}, 413
+    creator_status, creator = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if creator_status >= 400 or creator.get("error", {}).get("code") != "ok":
+        return {"status": "blocked", "reason": "creator_info_failed", "message": creator.get("error", {}).get("message")}, 502
+    allowed = creator.get("data", {}).get("privacy_level_options", [])
+    if privacy_level not in allowed:
+        return {"status": "blocked", "reason": "privacy_level_not_allowed", "allowed": allowed}, 400
+    init_status, init_data = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        json_body={
+            "post_info": {"title": title[:150], "privacy_level": privacy_level},
+            "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": size, "total_chunk_count": 1},
+        },
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if init_status >= 400 or init_data.get("error", {}).get("code") != "ok":
+        return {"status": "blocked", "reason": "publish_init_failed", "tiktok": init_data}, 502
+    publish_id = init_data.get("data", {}).get("publish_id")
+    upload_url = init_data.get("data", {}).get("upload_url")
+    if not publish_id or not upload_url:
+        return {"status": "blocked", "reason": "upload_url_missing"}, 502
+    response = await js_fetch(upload_url, _to_js({
+        "method": "PUT",
+        "headers": {"Content-Type": content_type, "Content-Length": str(size), "Content-Range": f"bytes 0-{size - 1}/{size}"},
+        "body": to_js(video_bytes),
+    }))
+    if response.status >= 300:
+        text = await response.text()
+        return {"status": "blocked", "reason": "video_upload_failed", "http_status": response.status, "response": text[:500]}, 502
+    return {"status": "uploaded_to_tiktok", "publish_id": publish_id, "bytes": size, "note": "TikTok processing/publish continues asynchronously."}, 200
+
+
+async def _tiktok_upload_init(runtime_env, video_size, title, privacy_level):
+    access_token, error = await _refresh_token(runtime_env)
+    if not access_token:
+        return {"status": "blocked", "reason": error}, 401
+    if video_size <= 0:
+        return {"status": "blocked", "reason": "empty_video"}, 400
+    if video_size > MAX_VIDEO_SIZE_BYTES:
+        return {"status": "blocked", "reason": "video_too_large", "max_bytes": MAX_VIDEO_SIZE_BYTES}, 413
+    creator_status, creator = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if creator_status >= 400 or creator.get("error", {}).get("code") != "ok":
+        return {"status": "blocked", "reason": "creator_info_failed", "message": creator.get("error", {}).get("message")}, 502
+    allowed = creator.get("data", {}).get("privacy_level_options", [])
+    if privacy_level not in allowed:
+        return {"status": "blocked", "reason": "privacy_level_not_allowed", "allowed": allowed}, 400
+    chunk_size = min(video_size, UPLOAD_CHUNK_MAX)
+    if video_size > UPLOAD_CHUNK_MAX:
+        chunk_count = (video_size + chunk_size - 1) // chunk_size
+    else:
+        chunk_count = 1
+    init_status, init_data = await _http_post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        json_body={
+            "post_info": {"title": title[:2200], "privacy_level": privacy_level},
+            "source_info": {"source": "FILE_UPLOAD", "video_size": video_size, "chunk_size": chunk_size, "total_chunk_count": chunk_count},
+        },
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+    )
+    if init_status >= 400 or init_data.get("error", {}).get("code") != "ok":
+        return {"status": "blocked", "reason": "publish_init_failed", "tiktok": init_data}, 502
+    data = init_data.get("data", {})
+    publish_id = data.get("publish_id")
+    upload_url = data.get("upload_url")
+    if not publish_id or not upload_url:
+        return {"status": "blocked", "reason": "upload_url_missing"}, 502
+    return {"status": "ready_for_direct_upload", "publish_id": publish_id, "upload_url": upload_url, "video_size": video_size, "chunk_size": chunk_size, "total_chunk_count": chunk_count, "expires_in_sec": 3600}, 200
+
+
+@app.post("/tiktok/upload/init")
+def tiktok_upload_init():
+    runtime_env = _request_env()
+    upload_key = _env_value("TIKTOK_UPLOAD_KEY", runtime_env)
+    supplied_key = request.headers.get("X-RINA-Upload-Key", "")
+    if not upload_key or not hmac.compare_digest(supplied_key, upload_key):
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    try:
+        video_size = int(body.get("video_size", 0))
+    except Exception:
+        return jsonify({"error": "invalid_video_size"}), 400
+    content_type = str(body.get("content_type", "video/mp4"))
+    if content_type not in ("video/mp4", "video/quicktime", "video/webm"):
+        return jsonify({"error": "unsupported_video_type", "content_type": content_type}), 400
+    title = str(body.get("title", "RINA daily video")).strip()
+    privacy_level = str(body.get("privacy_level", "SELF_ONLY")).strip()
+    try:
+        result, status = run_sync(_tiktok_upload_init(runtime_env, video_size, title, privacy_level))
+        result["content_type"] = content_type
+        return jsonify(result), status
+    except Exception as exc:
+        return jsonify({"error": "upload_init_exception", "reason": type(exc).__name__}), 502
+
+
+@app.post("/tiktok/upload")
+def tiktok_upload_legacy_blocked():
+    return jsonify({"error": "direct_upload_required", "message": "Initialize at /tiktok/upload/init, then PUT the video directly to TikTok upload_url."}), 410
 
 
 @app.post("/tiktok/webhook")
