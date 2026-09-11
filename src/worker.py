@@ -13,6 +13,14 @@ from js import Object, fetch as js_fetch
 from workers import WorkerEntrypoint, Response, wsgi
 
 app = Flask(__name__)
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "https://rinaai98.github.io"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 KV_NAME = "RINA_TIKTOK_KV"
 TOKEN_KEY = "tiktok/token/v1"
 QUEUE_KEY = "tiktok/daily/v1"
@@ -714,13 +722,10 @@ async def _tiktok_callback_native(request, env):
             "expires_at": int(time.time()) + int(token.get("expires_in", 86400)),
             "refresh_expires_at": int(time.time()) + int(token.get("refresh_expires_in", 31536000)),
         }))
-        return Response.json({
-            "status": "authorized",
-            "persistent_session": True,
-            "scope": token.get("scope", ""),
-            "expires_in": token.get("expires_in"),
-            "message": "TikTok authorization completed successfully.",
-        })
+        return Response.redirect(
+            "https://rinaai98.github.io/rina-ai-website/?tiktok=connected",
+            302,
+        )
     except Exception as exc:
         return Response.json({"error": "token_exchange_failed", "reason": type(exc).__name__}, status=502)
 
@@ -790,7 +795,11 @@ class Default(WorkerEntrypoint):
         if path == "/tiktok/callback":
             return await _tiktok_callback_native(request, self.env)
         if path == "/tiktok/preflight":
-            return await _tiktok_preflight_native(self.env)
+            response = await _tiktok_preflight_native(self.env)
+            response.headers.set("Access-Control-Allow-Origin", "https://rinaai98.github.io")
+            response.headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            response.headers.set("Access-Control-Allow-Headers", "Content-Type")
+            return response
         return await wsgi.fetch(app, request, self.env)
 
     async def scheduled(self, controller, env, ctx):
