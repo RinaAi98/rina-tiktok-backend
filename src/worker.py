@@ -189,7 +189,7 @@ async def _daily_upload(runtime_env):
         queue = {
             "video_url": DEFAULT_DAILY_VIDEO_URL,
             "title": "RINA daily video",
-            "privacy_level": "PUBLIC_TO_EVERYONE",
+            "privacy_level": "SELF_ONLY",
             "disable_duet": False,
             "disable_comment": False,
             "disable_stitch": False,
