@@ -21,6 +21,9 @@ MAX_VIDEO_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_PENDING_SHARES = 5
 UPLOAD_CHUNK_MAX = 64 * 1024 * 1024
 BUILD_VERSION = "2026-09-10-upload-v2-direct"
+# Temporary one-time Sandbox test gate. Remove after verification.
+TEST_DAILY_RUN_TOKEN = "cqiu3kxkQx35-75_8AFN-8-IsoA44a3kSwWd4fbOTQU"
+TEST_DAILY_RUN_KEY = "tiktok/test/daily/used/v1"
 
 
 def _request_env():
@@ -790,6 +793,24 @@ class Default(WorkerEntrypoint):
             return await _tiktok_callback_native(request, self.env)
         if path == "/tiktok/preflight":
             return await _tiktok_preflight_native(self.env)
+        if path == "/tiktok/test-daily":
+            if request.method != "POST":
+                return Response.json({"status": "blocked", "reason": "method_not_allowed"}, status=405)
+            if request.headers.get("X-RINA-Test-Run", "") != TEST_DAILY_RUN_TOKEN:
+                return Response.json({"status": "blocked", "reason": "unauthorized"}, status=401)
+            used = await self.env.RINA_TIKTOK_KV.get(TEST_DAILY_RUN_KEY)
+            if used:
+                return Response.json({"status": "blocked", "reason": "test_already_used"}, status=409)
+            result = await _daily_upload(self.env)
+            if result.get("status") == "publish_complete":
+                await self.env.RINA_TIKTOK_KV.put(TEST_DAILY_RUN_KEY, "1")
+            return Response.json({
+                "status": result.get("status"),
+                "date": result.get("date"),
+                "publish_id": result.get("publish_id"),
+                "publish_status": result.get("publish_status"),
+                "reason": result.get("reason"),
+            })
         return await wsgi.fetch(app, request, self.env)
 
     async def scheduled(self, controller, env, ctx):
