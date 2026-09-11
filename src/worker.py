@@ -731,62 +731,27 @@ async def _tiktok_callback_native(request, env):
 
 
 async def _tiktok_preflight_native(env):
-    """Async preflight path; avoids WSGI run_sync for network/KV I/O."""
-    # Match the scheduled publisher: refresh an expired access token using
-    # the stored refresh token, without initializing or publishing a post.
+    """Read-only readiness check with safe error reporting."""
     try:
         token, refresh_error = await _refresh_token(env)
+        if not token:
+            return Response.json({"status":"blocked","reason":refresh_error or "access_token_unavailable"}, status=401)
+        status_code, creator_data = await _http_post("https://open.tiktokapis.com/v2/post/publish/creator_info/query/", headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"})
+        if status_code >= 400 or creator_data.get("error",{}).get("code") != "ok":
+            return Response.json({"status":"blocked","reason":creator_data.get("error",{}).get("code") or "creator_info_failed","message":creator_data.get("error",{}).get("message")}, status=502)
+        creator=creator_data.get("data",{})
+        raw_queue=await env.RINA_TIKTOK_KV.get(QUEUE_KEY)
+        queue=json.loads(raw_queue) if raw_queue else {"video_url":DEFAULT_DAILY_VIDEO_URL,"title":"RINA daily video","privacy_level":"SELF_ONLY","is_aigc":True}
+        allowed=creator.get("privacy_level_options",[])
+        requested=queue.get("privacy_level") or "SELF_ONLY"
+        reasons=[]
+        if requested not in allowed: reasons.append("privacy_level_not_allowed")
+        duration=queue.get("duration_sec")
+        maximum=creator.get("max_video_post_duration_sec")
+        if duration and maximum and float(duration)>float(maximum): reasons.append("duration_exceeds_creator_limit")
+        return Response.json({"status":"ready" if not reasons else "blocked","build_version":BUILD_VERSION,"creator":{"username":creator.get("creator_username"),"nickname":creator.get("creator_nickname"),"privacy_level_options":allowed,"max_video_post_duration_sec":maximum,"comment_disabled":creator.get("comment_disabled"),"duet_disabled":creator.get("duet_disabled"),"stitch_disabled":creator.get("stitch_disabled")},"queue":queue,"media":{"url":queue.get("video_url") or DEFAULT_DAILY_VIDEO_URL},"reasons":reasons,"note":"Read-only preflight; no publish request was sent."})
     except Exception as exc:
-        return Response.json({"status": "blocked", "reason": "token_refresh_" + type(exc).__name__}, status=502)
-    if not token:
-        return Response.json({"status": "blocked", "reason": refresh_error or "access_token_unavailable"}, status=401)
-    try:
-        status_code, creator_data = await _http_post(
-            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-    except Exception as exc:
-        return Response.json({"status": "blocked", "reason": "creator_request_" + type(exc).__name__}, status=502)
-    if status_code >= 400 or creator_data.get("error", {}).get("code") != "ok":
-        return Response.json({
-            "status": "blocked",
-            "reason": creator_data.get("error", {}).get("code") or "creator_info_failed",
-            "message": creator_data.get("error", {}).get("message"),
-        }, status=502)
-    creator = creator_data.get("data", {})
-    raw_queue = await env.RINA_TIKTOK_KV.get(QUEUE_KEY)
-    queue = json.loads(raw_queue) if raw_queue else {
-        "video_url": DEFAULT_DAILY_VIDEO_URL,
-        "privacy_level": "SELF_ONLY",
-    }
-    allowed = creator.get("privacy_level_options", [])
-    requested = queue.get("privacy_level") or "SELF_ONLY"
-    reasons = []
-    if requested not in allowed:
-        reasons.append("privacy_level_not_allowed")
-    if requested == "PUBLIC_TO_EVERYONE" and "PUBLIC_TO_EVERYONE" not in allowed:
-        reasons.append("public_post_not_allowed")
-    duration = queue.get("duration_sec")
-    maximum = creator.get("max_video_post_duration_sec")
-    if duration and maximum and float(duration) > float(maximum):
-        reasons.append("duration_exceeds_creator_limit")
-    return Response.json({
-        "status": "ready" if not reasons else "blocked",
-        "build_version": BUILD_VERSION,
-        "creator": {
-            "username": creator.get("creator_username"),
-            "nickname": creator.get("creator_nickname"),
-            "privacy_level_options": allowed,
-            "max_video_post_duration_sec": maximum,
-            "comment_disabled": creator.get("comment_disabled"),
-            "duet_disabled": creator.get("duet_disabled"),
-            "stitch_disabled": creator.get("stitch_disabled"),
-        },
-        "queue": queue,
-        "media": {"url": queue.get("video_url") or DEFAULT_DAILY_VIDEO_URL},
-        "reasons": reasons,
-        "note": "Read-only preflight; no publish request was sent.",
-    })
+        return Response.json({"status":"blocked","reason":"preflight_"+type(exc).__name__}, status=502)
 
 
 class Default(WorkerEntrypoint):
