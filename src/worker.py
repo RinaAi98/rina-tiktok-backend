@@ -610,6 +610,60 @@ def tiktok_analytics():
         return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
 
 
+@app.get("/tiktok/videos")
+def tiktok_videos():
+    """Read-only monitoring bridge for the creator's public TikTok videos."""
+    runtime_env = _request_env()
+    if not _kv(runtime_env):
+        return jsonify({"status": "blocked", "reason": "kv_not_configured"}), 503
+    try:
+        token, refresh_error = run_sync(_refresh_token(runtime_env))
+        if not token:
+            return jsonify({
+                "status": "blocked",
+                "reason": refresh_error or "access_token_unavailable",
+            }), 401
+
+        fields = (
+            "id,create_time,cover_image_url,share_url,video_description,duration,"
+            "height,width,title,embed_link,like_count,comment_count,"
+            "share_count,view_count,is_aigc"
+        )
+        url = "https://open.tiktokapis.com/v2/video/list/?" + urlencode({
+            "fields": fields,
+            "max_count": 20,
+        })
+        status_code, data = run_sync(_http_post(
+            url,
+            json_body={"max_count": 20},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        ))
+        if status_code >= 400 or data.get("error", {}).get("code") != "ok":
+            return jsonify({
+                "status": "blocked",
+                "reason": "video_list_failed",
+                "message": data.get("error", {}).get("message"),
+            }), 502
+
+        page = data.get("data", {})
+        videos = page.get("videos", [])
+        return jsonify({
+            "status": "ready",
+            "source": "tiktok",
+            "privacy_scope": "PUBLIC_ONLY",
+            "videos": videos,
+            "video_count_returned": len(videos),
+            "has_more": bool(page.get("has_more")),
+            "cursor": page.get("cursor"),
+            "note": "Monitoring shows public TikTok posts only. Private/self-only uploads are not returned by TikTok video.list.",
+        })
+    except Exception as exc:
+        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
+
+
 @app.get("/tiktok/automation/status")
 def automation_status():
     if not _kv():
