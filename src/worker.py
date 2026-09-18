@@ -126,6 +126,16 @@ async def _http_head(url):
     return response.status, {}
 
 
+async def _http_get(url, headers=None):
+    response = await js_fetch(url, _to_js({"method": "GET", "headers": headers or {}}))
+    text = await response.text()
+    try:
+        payload = json.loads(text) if text else {}
+    except Exception:
+        payload = {"raw": text}
+    return response.status, payload
+
+
 async def _http_post(url, *, content=None, json_body=None, headers=None):
     request_headers = headers or {}
     body = None
@@ -538,6 +548,66 @@ def oauth_status():
         "refresh_expires_at": refresh_expires_at,
         "refresh_expires_in_sec": max(0, refresh_expires_at - now),
     })
+
+
+@app.get("/tiktok/analytics")
+def tiktok_analytics():
+    """Secure bridge: returns TikTok data without exposing OAuth token secrets."""
+    runtime_env = _request_env()
+    client_secret = _env_value("TIKTOK_CLIENT_SECRET", runtime_env)
+    supplied = request.headers.get("X-RINA-Analytics-Key", "")
+    if not client_secret or not hmac.compare_digest(supplied, client_secret):
+        return jsonify({"error": "unauthorized"}), 401
+    if not _kv(runtime_env):
+        return jsonify({"error": "kv_not_configured"}), 503
+
+    try:
+        token, refresh_error = run_sync(_refresh_token(runtime_env))
+        if not token:
+            return jsonify({"status": "blocked", "reason": refresh_error or "access_token_unavailable"}), 401
+
+        user_status, user_data = run_sync(_http_get(
+            "https://open.tiktokapis.com/v2/user/info/?fields=open_id,avatar_url,avatar_url_100,avatar_large_url,display_name"
+            , headers={"Authorization": f"Bearer {token}"}
+        ))
+        if user_status >= 400 or user_data.get("error", {}).get("code") != "ok":
+            return jsonify({"status": "blocked", "reason": "user_info_failed", "message": user_data.get("error", {}).get("message")}), 502
+
+        fields = (
+            "id,create_time,cover_image_url,share_url,video_description,duration,"
+            "height,width,title,embed_html,embed_link,like_count,comment_count,"
+            "share_count,view_count,is_aigc"
+        )
+        videos = []
+        cursor = None
+        max_videos = 100
+        while len(videos) < max_videos:
+            params = {"fields": fields, "max_count": min(20, max_videos - len(videos))}
+            if cursor is not None:
+                params["cursor"] = cursor
+            url = "https://open.tiktokapis.com/v2/video/list/?" + urlencode(params)
+            status_code, data = run_sync(_http_post(
+                url,
+                json_body={"max_count": params["max_count"]},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            ))
+            if status_code >= 400 or data.get("error", {}).get("code") != "ok":
+                return jsonify({"status": "blocked", "reason": "video_list_failed", "message": data.get("error", {}).get("message")}), 502
+            page = data.get("data", {})
+            videos.extend(page.get("videos", []))
+            if not page.get("has_more") or not page.get("cursor"):
+                break
+            cursor = page.get("cursor")
+
+        return jsonify({
+            "status": "ready",
+            "source": "tiktok",
+            "profile": user_data.get("data", {}).get("user", {}),
+            "videos": videos[:max_videos],
+            "video_count_returned": len(videos[:max_videos]),
+        })
+    except Exception as exc:
+        return jsonify({"status": "blocked", "reason": type(exc).__name__}), 502
 
 
 @app.get("/tiktok/automation/status")
